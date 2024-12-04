@@ -1,9 +1,20 @@
+''' 
+Description: ROS 2 PUBLISHER node for object detection using YOLOv5 and publishing detections to the RSLA system
+ 
+
+
+ Notes Log:
+ 2024-11-10: Comments added by Will M.
+'''
+
+
 import cv2
 from ultralytics import YOLO
 import os, sys
 
-import rclpy
-import rclpy.logging
+#Imported ROS 2 libraries
+import rclpy                                                   
+import rclpy.logging                                                        
 from rclpy.node import Node
 import rclpy.subscription
 from sensor_msgs.msg import Image
