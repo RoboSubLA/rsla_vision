@@ -16,6 +16,8 @@ from math import tan, radians
 
 import time
 
+print('------------This is a troubleshooing message--------------')
+
 frame_rate = 10
 prev_time = 0
 
@@ -24,19 +26,23 @@ bridge = CvBridge()
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
 node = None
-model = None
-model_classes = []
+model_front = None
+model_down = None
+model_classes_front = []
+model_classes_down = []
 
 class_widths = [22.86, 304.8, 30.48, 7.62, 7.62, 30.48, 335.28, 60.96]
 
-detections = []
+detections_front = []
+detections_down = []
 
 image_resolution = (640, 640)
 image_fov = (80, 64)
 
 start_time = 0
 
-detections_msg = DetectionArray()
+front_detections_msg = DetectionArray()
+down_detections_msg = DetectionArray()
 
 det_pub = None
 
@@ -46,10 +52,10 @@ def time_millis():
 def set_start_time():
     start_time = time_millis()
 
-def image_callback(img_msg):
+def image_callback_front(img_msg):
     global node
-    global model
-    global detections
+    global model_front
+    global detections_front
 
     current_time = time_millis()
 
@@ -57,16 +63,17 @@ def image_callback(img_msg):
         orig_image = bridge.imgmsg_to_cv2(img_msg, "bgr8")
         cv_image = cv2.resize(orig_image, (640, 640))
 
-        results = model.predict(cv_image)
+        results = model_front.predict(cv_image)
 
         boxes = results[0].boxes.xyxy.cpu().tolist()
         classes = results[0].boxes.cls.cpu().tolist()
         confidences = results[0].boxes.conf.cpu().tolist()
 
         raw_detections = list(zip(boxes, classes, confidences))
+        print(f'front raw detections: {raw_detections}')
 
         # Reset all current detections
-        for det in detections:
+        for det in detections_front:
             det["detected"] = False
 
         # Process new detections
@@ -74,7 +81,7 @@ def image_callback(img_msg):
             # Disregard low confidence predictions & gate legs (for now, because there's two of them in every frame)
             det_class = int(det[1])
 
-            if det[2] < 0.7 or model_classes[det_class] == "gate_leg":
+            if det[2] < 0.7 or model_classes_front[det_class] == "gate_leg":
                 continue
 
             # Only consider confident predictions
@@ -91,18 +98,71 @@ def image_callback(img_msg):
             rel_angular_size = (det_width / image_resolution[0]) * image_fov[0]
             approx_distance = class_widths[det_class] / tan(radians(rel_angular_size))
 
-            detections[det_class] = { "timestamp" : current_time, "class": det_class, "detected": True, "confidence": det[2], "angle": (det_yaw_rel_angle, det_pitch_rel_angle), "distance": approx_distance, "center": (det_center_x, det_center_y), "size": (det_width, det_height) }
+            detections_front[det_class] = { "timestamp" : current_time, "class": det_class, "detected": True, "confidence": det[2], "angle": (det_yaw_rel_angle, det_pitch_rel_angle), "distance": approx_distance, "center": (det_center_x, det_center_y), "size": (det_width, det_height) }
+    except CvBridgeError as e:
+        print(f"CvBridgeError: {e}")
+
+def image_callback_down(img_msg):
+    global node
+    global model_down
+    global detections_down
+
+    current_time = time_millis()
+
+    try:
+        orig_image = bridge.imgmsg_to_cv2(img_msg, "bgr8")
+        cv_image = cv2.resize(orig_image, (640, 640))
+
+        results = model_down.predict(cv_image)
+
+        boxes = results[0].boxes.xyxy.cpu().tolist()
+        classes = results[0].boxes.cls.cpu().tolist()
+        confidences = results[0].boxes.conf.cpu().tolist()
+
+        raw_detections = list(zip(boxes, classes, confidences))
+        print(f'down raw detections: {raw_detections}')
+
+        # Reset all current detections
+        for det in detections_down:
+            det["detected"] = False
+
+        # Process new detections
+        for det in raw_detections:
+            # Disregard low confidence predictions & gate legs (for now, because there's two of them in every frame)
+            det_class = int(det[1])
+
+            if det[2] < 0.7 or model_classes_down[det_class] == "gate_leg":
+                continue
+
+            # Only consider confident predictions
+            det_center_x = (det[0][0] + det[0][2]) / 2
+            det_center_y = (det[0][1] + det[0][3]) / 2
+            det_width = (det[0][2] - det[0][0])
+            det_height = (det[0][3] - det[0][1])
+
+            # Get angles
+            det_yaw_rel_angle = (image_fov[0] * (det_center_x - (image_resolution[0] / 2))) / image_resolution[0]
+            det_pitch_rel_angle = (image_fov[1] * (det_center_y - (image_resolution[1] / 2))) / image_resolution[1]
+
+            # Approximate distance (will be shit but alas)
+            rel_angular_size = (det_width / image_resolution[0]) * image_fov[0]
+            approx_distance = class_widths[det_class] / tan(radians(rel_angular_size))
+
+            detections_down[det_class] = { "timestamp" : current_time, "class": det_class, "detected": True, "confidence": det[2], "angle": (det_yaw_rel_angle, det_pitch_rel_angle), "distance": approx_distance, "center": (det_center_x, det_center_y), "size": (det_width, det_height) }
     except CvBridgeError as e:
         print(f"CvBridgeError: {e}")
 
 def publish_detection_array():
-    global detections
-    global detections_msg
-    global det_pub
+    global detections_front
+    global detections_down
+    global front_detections_msg
+    global down_detections_msg
+    global det_pub_front
+    global det_pub_down
 
     current_time = time_millis()
 
-    for index, detection in enumerate(detections):
+    for index, detection in enumerate(detections_front):
         if detection:
             new_detection = Detection()
             
@@ -114,30 +174,61 @@ def publish_detection_array():
             new_detection.ang_y = float(detection["angle"][1])
             new_detection.distance = float(detection["distance"])
 
-            detections_msg.detections[index] = new_detection
+            front_detections_msg.detections[index] = new_detection
 
-    det_pub.publish(detections_msg)
+    det_pub_front.publish(front_detections_msg)
+
+    for index, detection in enumerate(detections_down):
+        if detection:
+            new_detection = Detection()
+            
+            new_detection.id = int(detection["class"])
+            new_detection.detected = detection["detected"]
+            new_detection.confidence = float(detection["confidence"])
+            new_detection.millis_since_last_detected = current_time - detection["timestamp"]
+            new_detection.ang_x = float(detection["angle"][0])
+            new_detection.ang_y = float(detection["angle"][1])
+            new_detection.distance = float(detection["distance"])
+
+            down_detections_msg.detections[index] = new_detection
+
+    det_pub_down.publish(down_detections_msg)
 
 def main(args = None):
     global node
-    global model
-    global model_classes
-    global detections
-    global det_pub
+    global model_front
+    global model_down
+    global model_classes_front
+    global model_classes_down
+    global detections_front
+    global detections_down
+    global front_detections_msg
+    global down_detections_msg
+    global det_pub_front
+    global det_pub_down
 
     set_start_time()
 
     # Create the YOLO network
-    model = YOLO(os.path.expanduser("~/cv_model/best.pt"))
-    model_classes = model.names
+    model_front = YOLO(os.path.expanduser("~/cv_model/best_front.pt"))
+    model_down = YOLO(os.path.expanduser("~/cv_model/best_down.pt"))
+    model_classes_front = model_front.names
+    model_classes_down = model_down.names
 
-    print(model_classes)
+    print(f'front: {model_classes_front}')
+    print(f'down: {model_classes_down}')
 
-    for index in model_classes:
-        detections.append({ "timestamp" : 0, "class": index, "detected": False, "confidence": 0, "angle": (0, 0), "distance": 0.0, "center": (0, 0), "size": (0, 0) })
+    for index in model_classes_front:
+        detections_front.append({ "timestamp" : 0, "class": index, "detected": False, "confidence": 0, "angle": (0, 0), "distance": 0.0, "center": (0, 0), "size": (0, 0) })
 
         default_detection = Detection(detected=False)
-        detections_msg.detections.append(default_detection)
+        front_detections_msg.detections.append(default_detection)
+
+    for index in model_classes_down:
+        detections_down.append({ "timestamp" : 0, "class": index, "detected": False, "confidence": 0, "angle": (0, 0), "distance": 0.0, "center": (0, 0), "size": (0, 0) })
+
+        default_detection = Detection(detected=False)
+        down_detections_msg.detections.append(default_detection)
 
     # Init the ROS node
     rclpy.init(args = args)
@@ -146,11 +237,14 @@ def main(args = None):
     node = rclpy.create_node('rsla_vision')
 
     # Initialize the image subscriber
-    img_sub = node.create_subscription(Image, '/front_camera/image_raw', image_callback, 1)
-    img_sub
+    img_sub_front = node.create_subscription(Image, '/front_camera/image_raw', image_callback_front, 1)
+    img_sub_down = node.create_subscription(Image, '/down_camera/image_raw', image_callback_down, 1)
+    img_sub_front
+    img_sub_down
 
-    # Initialize the detection subscriber
-    det_pub = node.create_publisher(DetectionArray, "rsla/vision/detections", 1)
+    # Initialize the detection publisher
+    det_pub_front = node.create_publisher(DetectionArray, "rsla/vision/front_detections", 1)
+    det_pub_down  = node.create_publisher(DetectionArray, "rsla/vision/down_detections", 1)
 
     det_pub_timer = node.create_timer(0.5, publish_detection_array)
     det_pub_timer
