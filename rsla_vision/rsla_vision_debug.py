@@ -1,7 +1,6 @@
 import cv2
 from ultralytics import YOLO
 import os, sys
-import numpy as np
 
 import rclpy
 import rclpy.logging
@@ -12,7 +11,6 @@ from cv_bridge import CvBridge, CvBridgeError
 
 from rsla_interfaces.msg import Detection
 from rsla_interfaces.msg import DetectionArray
-from rsla_interfaces.msg import PoseEuler
 
 from math import tan, radians
 
@@ -28,12 +26,12 @@ bridge = CvBridge()
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
 node = None
-# model_front = None
+model_front = None
 model_down = None
-# model_classes_front = []
-model_classes_down = ["fire", "buoy", "table"]
+model_classes_front = []
+model_classes_down = []
 
-class_height = [0.305, 0.305, 0.6] # in meters
+# class_widths = [22.86, 304.8, 30.48, 7.62, 7.62, 30.48, 335.28, 60.96]
 
 detections_front = []
 detections_down = []
@@ -47,6 +45,12 @@ front_detections_msg = DetectionArray()
 down_detections_msg = DetectionArray()
 
 det_pub = None
+cv_front_pub = None
+cv_front_results = None
+#cv_down_pub = None
+
+cv_image_front = None
+cv_image_down = None
 
 def time_millis():
     return round(time.time() * 1000) - start_time
@@ -58,18 +62,20 @@ def image_callback_front(img_msg):
     global node
     global model_front
     global detections_front
+    global cv_image_front
+    global cv_front_results
 
     current_time = time_millis()
 
     try:
         orig_image = bridge.imgmsg_to_cv2(img_msg, "bgr8")
-        cv_image = cv2.resize(orig_image, (640, 640))
+        cv_image_front = cv2.resize(orig_image, (640, 640))
 
-        results = model_front.predict(cv_image)
+        cv_front_results = model_front.predict(cv_image_front)
 
-        boxes = results[0].boxes.xyxy.cpu().tolist()
-        classes = results[0].boxes.cls.cpu().tolist()
-        confidences = results[0].boxes.conf.cpu().tolist()
+        boxes = cv_front_results[0].boxes.xyxy.cpu().tolist()
+        classes = cv_front_results[0].boxes.cls.cpu().tolist()
+        confidences = cv_front_results[0].boxes.conf.cpu().tolist()
 
         raw_detections = list(zip(boxes, classes, confidences))
         print(f'front raw detections: {raw_detections}')
@@ -97,11 +103,10 @@ def image_callback_front(img_msg):
             det_pitch_rel_angle = (image_fov[1] * (det_center_y - (image_resolution[1] / 2))) / image_resolution[1]
 
             # Approximate distance (will be shit but alas)
-            rel_angular_size = (det_height / image_resolution[1]) * image_fov[1]
-            approx_distance = class_height[det_class] / tan(radians(rel_angular_size))
+            rel_angular_size = (det_width / image_resolution[0]) * image_fov[0]
+            approx_distance = 0 # class_widths[det_class] / tan(radians(rel_angular_size))
 
-            if not detections_front[det_class]["detected"] or detections_front[det_class]["distance"] > approx_distance:
-                detections_front[det_class] = { "timestamp" : current_time, "class": det_class, "detected": True, "confidence": det[2], "angle": (det_yaw_rel_angle, det_pitch_rel_angle), "distance": approx_distance, "center": (det_center_x, det_center_y), "size": (det_width, det_height) }
+            detections_front[det_class] = { "timestamp" : current_time, "class": det_class, "detected": True, "confidence": det[2], "angle": (det_yaw_rel_angle, det_pitch_rel_angle), "distance": approx_distance, "center": (det_center_x, det_center_y), "size": (det_width, det_height) }
     except CvBridgeError as e:
         print(f"CvBridgeError: {e}")
 
@@ -109,14 +114,15 @@ def image_callback_down(img_msg):
     global node
     global model_down
     global detections_down
+    global cv_image_down
 
     current_time = time_millis()
 
     try:
         orig_image = bridge.imgmsg_to_cv2(img_msg, "bgr8")
-        cv_image = cv2.resize(orig_image, (640, 640)) # x 0 y 1
+        cv_image_down = cv2.resize(orig_image, (640, 640))
 
-        results = model_down.predict(cv_image, conf=0.5)
+        results = model_down.predict(cv_image_down)
 
         boxes = results[0].boxes.xyxy.cpu().tolist()
         classes = results[0].boxes.cls.cpu().tolist()
@@ -131,16 +137,15 @@ def image_callback_down(img_msg):
 
         # Process new detections
         for det in raw_detections:
+            # Disregard low confidence predictions & gate legs (for now, because there's two of them in every frame)
             det_class = int(det[1])
 
-            # Only consider left, then top-most predictions (just a heruistic)
-            det_center_x = (det[0][0] + det[0][2]) / 2
-            det_center_y = (det[0][1] + det[0][3]) / 2
-
-            current_center = detections_down[det_class]["center"]
-            if detections_down[det_class]["detected"] and (current_center[0] <= det_center_x if abs(current_center[0] - det_center_x) > 32 else current_center[1] <= det_center_y):
+            if det[2] < 0.7 or model_classes_down[det_class] == "gate_leg":
                 continue
 
+            # Only consider confident predictions
+            det_center_x = (det[0][0] + det[0][2]) / 2
+            det_center_y = (det[0][1] + det[0][3]) / 2
             det_width = (det[0][2] - det[0][0])
             det_height = (det[0][3] - det[0][1])
 
@@ -148,38 +153,58 @@ def image_callback_down(img_msg):
             det_yaw_rel_angle = (image_fov[0] * (det_center_x - (image_resolution[0] / 2))) / image_resolution[0]
             det_pitch_rel_angle = (image_fov[1] * (det_center_y - (image_resolution[1] / 2))) / image_resolution[1]
 
-            rel_angular_size = (det_height / image_resolution[1]) * image_fov[1]
-            approx_distance = class_height[det_class] / tan(radians(rel_angular_size))
+            # Approximate distance (will be shit but alas)
+            rel_angular_size = (det_width / image_resolution[0]) * image_fov[0]
+            approx_distance = 0 # class_widths[det_class] / tan(radians(rel_angular_size))
 
             detections_down[det_class] = { "timestamp" : current_time, "class": det_class, "detected": True, "confidence": det[2], "angle": (det_yaw_rel_angle, det_pitch_rel_angle), "distance": approx_distance, "center": (det_center_x, det_center_y), "size": (det_width, det_height) }
     except CvBridgeError as e:
         print(f"CvBridgeError: {e}")
 
 def publish_detection_array():
-    # global detections_front
+    global detections_front
     global detections_down
     global front_detections_msg
     global down_detections_msg
     global det_pub_front
     global det_pub_down
+    global cv_image_front
+    global cv_image_down
+    global cv_front_pub
+    #global cv_down_pub
+    global cv_front_results
 
     current_time = time_millis()
 
-    # for index, detection in enumerate(detections_front):
-    #     if detection:
-    #         new_detection = Detection()
+    for index, detection in enumerate(detections_front):
+        if detection:
+            new_detection = Detection()
             
-    #         new_detection.id = int(detection["class"])
-    #         new_detection.detected = detection["detected"]
-    #         new_detection.confidence = float(detection["confidence"])
-    #         new_detection.millis_since_last_detected = current_time - detection["timestamp"]
-    #         new_detection.ang_x = float(detection["angle"][0])
-    #         new_detection.ang_y = float(detection["angle"][1])
-    #         new_detection.distance = float(detection["distance"])
+            new_detection.id = int(detection["class"])
+            new_detection.detected = detection["detected"]
+            new_detection.confidence = float(detection["confidence"])
+            new_detection.millis_since_last_detected = current_time - detection["timestamp"]
+            new_detection.ang_x = float(detection["angle"][0])
+            new_detection.ang_y = float(detection["angle"][1])
+            new_detection.distance = float(detection["distance"])
 
-    #         front_detections_msg.detections[index] = new_detection
+            front_detections_msg.detections[index] = new_detection
 
-    # det_pub_front.publish(front_detections_msg)
+    det_pub_front.publish(front_detections_msg)
+    if cv_image_front is not None:
+        result = cv_front_results[0]
+        boxes = result.boxes.xyxy.tolist()
+        classes = result.boxes.cls.tolist()
+        names = result.names
+        confidences = result.boxes.conf.tolist()
+        for i, box in enumerate(boxes):
+            x1, y1, x2, y2 = map(int, box)
+            class_id = int(classes[i])
+            confidence = confidences[i]
+            label = f"{names[class_id]}: {confidence:.2f}"
+            cv2.rectangle(cv_image_front, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(cv_image_front, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        cv_front_pub.publish(bridge.cv2_to_imgmsg(cv_image_front, "bgr8"))
 
     for index, detection in enumerate(detections_down):
         if detection:
@@ -196,12 +221,14 @@ def publish_detection_array():
             down_detections_msg.detections[index] = new_detection
 
     det_pub_down.publish(down_detections_msg)
+    #if cv_image_down is not None:
+    #    cv_down_pub.publish(bridge.cv2_to_imgmsg(cv_image_down, "bgr8"))
 
 def main(args = None):
     global node
-    # global model_front
+    global model_front
     global model_down
-    # global model_classes_front
+    global model_classes_front
     global model_classes_down
     global detections_front
     global detections_down
@@ -209,25 +236,26 @@ def main(args = None):
     global down_detections_msg
     global det_pub_front
     global det_pub_down
+    global cv_front_pub
+    #global cv_down_pub
 
     set_start_time()
 
     # Create the YOLO network
-    # model_front = YOLO(os.path.expanduser("~/cv_model/best_front.pt"))
-    model_down = YOLO(os.path.expanduser("~/cv_model/best_down.engine"))
-    # model_classes_front = model_front.names
+    model_front = YOLO(os.path.expanduser("~/cv_model/best_front.pt"))
+    model_down = YOLO(os.path.expanduser("~/cv_model/best_down.pt"))
+    model_classes_front = model_front.names
     model_classes_down = model_down.names
 
-    # print(f'front: {model_classes_front}')
+    print(f'front: {model_classes_front}')
     print(f'down: {model_classes_down}')
 
-    # for index in model_classes_front:
-    #     detections_front.append({ "timestamp" : 0, "class": index, "detected": False, "confidence": 0, "angle": (0, 0), "distance": 0.0, "center": (0, 0), "size": (0, 0) })
+    for index in model_classes_front:
+        detections_front.append({ "timestamp" : 0, "class": index, "detected": False, "confidence": 0, "angle": (0, 0), "distance": 0.0, "center": (0, 0), "size": (0, 0) })
 
-    #     default_detection = Detection(detected=False)
-    #     front_detections_msg.detections.append(default_detection)
+        default_detection = Detection(detected=False)
+        front_detections_msg.detections.append(default_detection)
 
-    # Initialize the down classes.
     for index in model_classes_down:
         detections_down.append({ "timestamp" : 0, "class": index, "detected": False, "confidence": 0, "angle": (0, 0), "distance": 0.0, "center": (0, 0), "size": (0, 0) })
 
@@ -241,16 +269,21 @@ def main(args = None):
     node = rclpy.create_node('rsla_vision')
 
     # Initialize the image subscriber
-    # img_sub_front = node.create_subscription(Image, '/front_camera/image_raw', image_callback_front, 1)
+    img_sub_front = node.create_subscription(Image, '/front_camera/image_raw', image_callback_front, 1)
     img_sub_down = node.create_subscription(Image, '/down_camera/image_raw', image_callback_down, 1)
-    # img_sub_front
+    img_sub_front
     img_sub_down
 
     # Initialize the detection publisher
-    # det_pub_front = node.create_publisher(DetectionArray, "rsla/vision/front_detections", 1)
+    det_pub_front = node.create_publisher(DetectionArray, "rsla/vision/front_detections", 1)
     det_pub_down  = node.create_publisher(DetectionArray, "rsla/vision/down_detections", 1)
 
-    det_pub_timer = node.create_timer(0.05, publish_detection_array)
+    # Initialize the cv image publishers
+    cv_front_pub = node.create_publisher(Image, "rsla/vision/front_overlay", 1)
+    #cv_down_pub = node.create_publisher(Image, "rsla/vision/down_overlay", 1)
+
+    # Initialize the publisher timer
+    det_pub_timer = node.create_timer(0.5, publish_detection_array)
     det_pub_timer
 
     while rclpy.ok():

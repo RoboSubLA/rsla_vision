@@ -5,10 +5,13 @@ import os, sys
 frame_rate = 10
 prev_time = 0
 
+front_camera_path="/dev/video_front"
+down_camera_path="/dev/video_down"
+
 rec_path = os.path.expanduser("~/rsla-rec/")
 
 def main(args = None):
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(front_camera_path)
 
     frame_width = int(cap.get(3))
     frame_height = int(cap.get(4))
@@ -20,7 +23,7 @@ def main(args = None):
     print("Frame dimensions: ", size)
     
     # Find next filename
-    output_filename_prefix = "rsla_vid_output_"
+    output_filename_prefix = "rsla_vid_front_output_"
     output_type = "mp4"
     output_filename_iterator = 0
     output_filename = ""

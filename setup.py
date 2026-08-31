@@ -21,7 +21,8 @@ setup(
     entry_points={
         'console_scripts': [
             'rsla_vision = rsla_vision.rsla_vision:main',
-            'rsla_vision_record = rsla_vision.rsla_vision_record:main'
+            'rsla_vision_record = rsla_vision.rsla_vision_record:main',
+            'rsla_vision_debug = rsla_vision.rsla_vision_debug:main'
         ],
     },
 )

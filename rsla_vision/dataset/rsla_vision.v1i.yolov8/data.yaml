@@ -2,8 +2,8 @@ train: ../train/images
 val: ../valid/images
 test: ../test/images
 
-nc: 1
-names: ['face']
+nc: 7
+names: ["divider", "left_gate_post", "red_post", "right_gate_post", "shark", "swordfish", "white_post"]
 
 roboflow:
   workspace: jordan-doose
